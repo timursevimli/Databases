@@ -3,41 +3,33 @@
 const { Pool } = require('pg');
 
 const where = (conditions) => {
-  let clause = '';
+  const operators = ['>=', '<=', '<>', '>', '<'];
+  const clauses = [];
   const args = [];
   let i = 1;
+
   for (const key in conditions) {
     let value = conditions[key];
-    let condition;
-    if (typeof value === 'number') {
-      condition = `${key} = $${i}`;
-    } else if (typeof value === 'string') {
-      if (value.startsWith('>=')) {
-        condition = `${key} >= $${i}`;
-        value = value.substring(2);
-      } else if (value.startsWith('<=')) {
-        condition = `${key} <= $${i}`;
-        value = value.substring(2);
-      } else if (value.startsWith('<>')) {
-        condition = `${key} <> $${i}`;
-        value = value.substring(2);
-      } else if (value.startsWith('>')) {
-        condition = `${key} > $${i}`;
-        value = value.substring(1);
-      } else if (value.startsWith('<')) {
-        condition = `${key} < $${i}`;
-        value = value.substring(1);
-      } else if (value.includes('*') || value.includes('?')) {
-        value = value.replace(/\*/g, '%').replace(/\?/g, '_');
-        condition = `${key} LIKE $${i}`;
-      } else {
-        condition = `${key} = $${i}`;
+    let condition = `${key} = $${i}`;
+
+    if (typeof value === 'string') {
+      for (const op of operators) {
+        if (value.startsWith(op)) {
+          condition = `${key} ${op} $${i}`;
+          value = value.substring(op.length);
+        } else if (value.includes('*') || value.includes('?')) {
+          value = value.replace(/\*/g, '%').replace(/\?/g, '_');
+          condition = `${key} LIKE $${i}`;
+        }
       }
     }
+
     i++;
     args.push(value);
-    clause = clause ? `${clause} AND ${condition}` : condition;
+    clauses.push(condition);
   }
+
+  const clause = clauses.join(' AND ');
   return { clause, args };
 };
 
@@ -102,41 +94,35 @@ class Cursor {
     return this;
   }
 
-  order(name) {
+  order(name, order) {
     this.orderBy = name;
+    if (order) this.orderBy += ` ${order.toUpperCase()}`;
     return this;
   }
 
   then(callback) {
-    // TODO: store callback to pool
     const { mode, table, columns, args } = this;
-    const { whereClause, orderBy, columnName } = this;
+    const { whereClause, orderBy } = this;
     const fields = columns.join(', ');
     let sql = `SELECT ${fields} FROM ${table}`;
     if (whereClause) sql += ` WHERE ${whereClause}`;
     if (orderBy) sql += ` ORDER BY ${orderBy}`;
     this.database.query(sql, args,  (err, res) => {
+      if (err) return void callback(err);
       this.resolve(res);
-      const { rows, cols } = this;
-      if (mode === MODE_VALUE) {
-        const col = cols[0];
-        const row = rows[0];
-        callback(row[col.name]);
-      } else if (mode === MODE_ROW) {
-        callback(rows[0]);
-      } else if (mode === MODE_COL) {
-        const col = [];
-        for (const row of rows) {
-          col.push(row[columnName]);
-        }
-        callback(col);
-      } else if (mode === MODE_COUNT) {
-        callback(this.rowCount);
-      } else {
-        callback(rows);
-      }
+      const result = this.processMode(mode);
+      callback(null, result);
     });
     return this;
+  }
+
+  processMode(mode) {
+    const { rows, cols, columnName, rowCount } = this;
+    if (mode === MODE_ROW) return rows[0];
+    if (mode === MODE_COUNT) return rowCount;
+    if (mode === MODE_COL) return rows.map((row) => row[columnName]);
+    if (mode === MODE_VALUE) return rows[0][cols[0].name];
+    return rows;
   }
 }
 
@@ -144,20 +130,21 @@ class Database {
   constructor(config, logger) {
     this.pool = new Pool(config);
     this.config = config;
-    this.logger = logger;
+    this.logger = logger || console.log;
   }
 
   query(sql, values, callback) {
+    const { logger } = this;
     if (typeof values === 'function') {
       callback = values;
       values = [];
     }
     const startTime = new Date().getTime();
-    console.log({ sql, values });
+    logger({ sql, values });
     this.pool.query(sql, values, (err, res) => {
       const endTime = new Date().getTime();
       const executionTime = endTime - startTime;
-      console.log(`Execution time: ${executionTime}`);
+      logger(`Execution time: ${executionTime}`);
       if (callback) callback(err, res);
     });
   }
